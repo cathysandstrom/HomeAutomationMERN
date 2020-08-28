@@ -27,7 +27,7 @@ async function performGet(url) {
         return req.data
     }
     catch(err) {
-        console.log(err)
+        console.log(err.response.data)
     }
 }
 
@@ -66,7 +66,6 @@ async function sendDeviceCommand(id, command, value) {
     
     return await performGet(url)
 }
-
 
 module.exports = {
     getDevices,

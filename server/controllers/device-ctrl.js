@@ -1,13 +1,22 @@
-// router.post('/devices', DeviceCtrl.refreshDevices)
-// router.get('/devices/:id', DeviceCtrl.getDeviceById)
-// router.get('/devices', DeviceCtrl.getKnownDevices)
-
 const Device = require('../models/device-model')
 const makerapi = require('./makerapi-ctrl.js');
 
-async function refreshDevices(req, res) {
+function ErrorMessage(err, errCode) {
+    console.log(err)
+    if(errCode) return result(errCode, {error:err});
+    return result(400, {error:err});
+}
+
+function result(num, msg) {
+    return {
+        status: num,
+        json: msg
+    }
+}
+
+async function refreshDevices() {
     const allDevices = await makerapi.getAllDevices();
-    if(!allDevices) return res.status(400).json({section: "loading current devices", error:"failed to load devices"})
+    if(!allDevices) return ErrorMessage({section: "loading current devices", error:"failed to load devices"})
 
     const allIDs = allDevices.map(a => a.id)
 
@@ -17,7 +26,7 @@ async function refreshDevices(req, res) {
         deleted += del.deletedCount
     }
     catch (err) {
-        return res.status(400).json({section:"remove missing devices", error: err})
+        return ErrorMessage({section:"remove missing devices", error: err})
     }
 
     var updates = []
@@ -29,6 +38,7 @@ async function refreshDevices(req, res) {
                 return [added.nModified, added.upserted]
             }
             catch (err) {
+                console.log(err)
                 return [1]
             }
         }
@@ -47,7 +57,8 @@ async function refreshDevices(req, res) {
         }
     })
 
-    return res.status(200).json({
+    //modified is always true even if nothing changes unless its upserted
+    return result(200, {
         deleted: deleted,
         added: added,
         modified: modified,
@@ -55,61 +66,146 @@ async function refreshDevices(req, res) {
     })
 }
 
-async function refreshDeviceById(req, res) {
-    const newData = await makerapi.getDeviceByID(req.id)
-    if(!newData) return res.status(400).json({error:"failed to load device data to update"});
+async function getKnownDevices() {
+    var device = await Device.find({}).catch(err => {return ErrorMessage(err)})
+    return result(200, device)
+}
 
-    Device.updateOne( {id: newData.id}, newData, function(err, doc) {
-        if(err) return res.status(400).json({error:err})
-        console.log(doc)
+async function getAllCommands() {
+    console.log("got here")
+     Device.aggregate([
+        {$unwind: "$commands"},{$project: {
+            id: "$id",
+            name: "$name",
+            label:"$label",
+            command: "$commands.command"
+        }},
+        {$group: {
+            _id: "$command",
+            devices: { $addToSet: {
+                id: "$id",
+                name: "$name",
+                label:"$label",
+            } }
+        }},
+    ], (err, list) => {
+        if(err) return ErrorMessage(err);  
+        console.log(err)
+        return result(200, list)
+    }).catch(err => {return ErrorMessage(err)})
+}
+
+async function sendAllCommand(command) {
+    var devices = await Device.find({}).catch(err => {return ErrorMessage(err)})
+    if(!devices.length) 
+        return ErrorMessage("No devices to command.", 404)
+
+
+    var commands = []
+    devices.forEach(d => {
+        commands.push(makerapi.sendDeviceCommand(d.id, command))
+    });
+
+    var values = await Promise.all(commands)
+    .catch(err => {
+        return ErrorMessage(err) 
     })
+    return result(200, {values: values})
+}   
 
-    return res.status(200).json({msg: "device updated"})
+async function getAllGroups() {
+    console.log("got here")
+    await Device.aggregate([
+        {$unwind: "$groups"},{$project: {
+            id: "$id",
+            name: "$name",
+            label:"$label",
+            group: "$groups"
+        }},
+        {$group: {
+            _id: "$group",
+            devices: { $addToSet: {
+                id: "$id",
+                name: "$name",
+                label:"$label",
+            } }
+        }},
+    ], (err, list) => {
+        if(err) return ErrorMessage(err);
+        console.log(list)
+        return result(200, list)
+    }).catch(err => {return ErrorMessage(err)})
 }
 
-async function addDeviceGroups(req, res) {
-    
+async function refreshDeviceById(id) {
+    const newData = await makerapi.getDeviceByID(id)
+    if(!newData) return ErrorMessage("failed to load device data to update")
+
+    await Device.updateOne( {id: id}, newData, function(err, doc) {
+        if(err) return ErrorMessage(err)
+        if(!doc) return ErrorMessage("Device not found", 404)
+        return result(200, {result: doc})
+    }).catch(err => {return ErrorMessage(err)})
 }
 
-async function deleteDeviceGroup(req, res) {
-    
+async function getDeviceGroups(id) {
+    await Device.findOne({id: id}, (err, device) => {
+        if(err) return ErrorMessage(err);
+        if(!device) return ErrorMessage("Device not found", 404)
+        return result(200, {groups: device.groups})
+    }).catch(err => {return ErrorMessage(err)})
 }
 
-async function sendAllCommand(req, res) {
-    const body = req.body 
-    if(!body) return res.status(400).json({error:"no command provided"})
+async function addDeviceGroups(id, groups) {
+    if(!groups) return ErrorMessage({error:"bad json body"})
 
-    await Device.find({}, (err, devices) => {
-        if(err) return res.status(400).json({error: err});
-        if(!devices.length) 
-            return res.status(400).json({error: "No devices to command."});
-
-        var commands = []
-        devices.forEach(d => {
-            commands.push(makerapi.sendDeviceCommand(d.id, body.command))
-        });
-
-        Promise.all(commands).then(values => {
-            return res.status(200).json({values: values})
-        })
-        .catch(err => {
-            return res.status(400).json({error:err})
-        })
-    }).catch(err => console.log(err))
+    await Device.updateOne({id: id}, { $addToSet: { groups: { $each: body['groups']}} }, (err, doc) => {
+        if(err) return ErrorMessage(err)
+        return result(200, {result: doc})
+    }).catch(err => {return ErrorMessage(err)})
 }
 
-async function getDeviceById(req, res) {
+async function deleteDeviceGroups(id, groups) {
+    if(!groups) return ErrorMessage({error:"bad json body"})
 
+    await Device.updateOne({id: id}, { $pull: { groups: { $in: body['groups']}} }, (err, doc) => {
+        if(err) return ErrorMessage(err)
+        return result(200, {result: doc})
+    }).catch(err => {return ErrorMessage(err)})
 }
 
-async function getKnownDevices(req, res) {
+async function getDeviceCommands(id) {
+    await Device.findOne({id: id}, "commands.command", (err, device) => {
+        if(err) return ErrorMessage(err);
+        if(!device) return ErrorMessage("Device not found", 404)
+        return result(200, {commands: device.commands})
+    }).catch(err => {return ErrorMessage(err)})
+}
 
+async function sendDeviceCommand(id, command, value) {
+    var result = await makerapi.sendDeviceCommand(id, command, value)
+    if(!result) return ErrorMessage("failed to send device command")
+    return result(200, result)
+}
+
+async function getKnownDeviceById(id) {
+    await Device.findOne({id: id}, (err, device) => {
+        if(err) return ErrorMessage(err);
+        return result(200, device)
+    }).catch(err => {return ErrorMessage(err)})
 }
 
 module.exports = {
     refreshDevices, 
-    updateDeviceGroup,
-    getDeviceById,
+    refreshDeviceById,
+    addDeviceGroups,
+    deleteDeviceGroups,
+    getKnownDeviceById,
     getKnownDevices,
-    sendAllCommand
+    sendAllCommand,
+    sendDeviceCommand,
+    getAllCommands,
+    getAllGroups,
+    getDeviceCommands,
+    getDeviceGroups,
 }
